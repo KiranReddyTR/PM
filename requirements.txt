@@ -1,11 +1,27 @@
+# Core Streamlit app
 streamlit>=1.27.0
+
+# Lottie animations
+streamlit-lottie>=0.0.5
+
+# Data handling
 pandas
 numpy
+
+# Plotting
 matplotlib
+
+# NLP & embeddings
 sentence-transformers
 torch
 spacy
+
+# Document parsing
 pdfplumber
 docx2txt
+
+# YouTube API
 google-api-python-client
+
+# Machine learning utils (optional, in your code)
 scikit-learn
