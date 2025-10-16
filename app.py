@@ -1,57 +1,125 @@
 import streamlit as st
 import requests
-import re
-import PyPDF2
+import pandas as pd
+import pdfplumber
 import docx2txt
+import numpy as np
+import matplotlib.pyplot as plt
+from sentence_transformers import SentenceTransformer, util
 import googleapiclient.discovery
-import streamlit.components.v1 as components
+import spacy
+from spacy.cli import download
 from streamlit_lottie import st_lottie
-from sklearn.feature_extraction.text import CountVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+import streamlit.components.v1 as components
 
-# ---------------------------
-# 🔹 BASIC PAGE CONFIG & STYLE
-# ---------------------------
-st.set_page_config(page_title="ProFileMatch — AI Resume Analyzer", layout="wide")
+# -----------------------------
+# Page config & theme
+# -----------------------------
+st.set_page_config(page_title="AI Resume Analyzer — Pro Edition", layout="wide")
 
+# Custom CSS for dark theme
 st.markdown("""
 <style>
-.stApp {
-    background: linear-gradient(180deg, #0a1121 0%, #0e1b35 100%);
-    color: #e8ecf2;
-}
-.title {
-    font-size: 60px;
-    font-weight: 700;
-    text-align: center;
-    background: linear-gradient(90deg, silver, black);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    margin-bottom: 1rem;
-}
-.button-grand > button {
-    background: linear-gradient(90deg, #6366f1, #0ea5e9);
-    color: white !important;
-    border: none;
-    border-radius: 12px;
-    font-size: 18px;
-    padding: 0.75rem 1.5rem;
-    box-shadow: 0 6px 20px rgba(14,165,233,0.4);
-}
-.metric-box {
-    background: linear-gradient(180deg, rgba(37,99,235,0.15), rgba(14,165,233,0.08));
-    padding: 1.5rem;
-    border-radius: 16px;
-    text-align: center;
-    margin-top: 1.5rem;
-}
+.stApp { background: linear-gradient(180deg, #0a1121 0%, #0e1b35 100%); color: #e8ecf2; }
+.stButton>button { background: linear-gradient(90deg,#0ea5e9,#6366f1); color: white; border:none; border-radius:8px; }
+.metric-box { padding:1.5rem; border-radius:16px; background:linear-gradient(180deg, rgba(37,99,235,0.15), rgba(14,165,233,0.08)); text-align:center; }
+.skill-section { background: rgba(255,255,255,0.05); padding:1rem; border-radius:12px; }
+.pill { display:inline-block; padding:8px 12px; border-radius:999px; background:rgba(255,255,255,0.08); margin:5px; font-size:14px; }
+.card { padding: 1rem; border-radius: 12px; background: rgba(255,255,255,0.03); box-shadow: 0 6px 18px rgba(0,0,0,0.3); }
 </style>
 """, unsafe_allow_html=True)
 
-# ---------------------------
-# 🔹 LOTTIE LOADER
-# ---------------------------
-def load_lottie_url(url):
+# -----------------------------
+# Load NLP model
+# -----------------------------
+model_name = "en_core_web_md"
+try:
+    nlp = spacy.load(model_name)
+except OSError:
+    download(model_name)
+    nlp = spacy.load(model_name)
+
+st_model = SentenceTransformer('all-MiniLM-L6-v2')
+
+# YouTube API
+YOUTUBE_API_KEY = "YOUR_YOUTUBE_API_KEY"
+YOUTUBE_API_SERVICE_NAME = "youtube"
+YOUTUBE_API_VERSION = "v3"
+
+# -----------------------------
+# Session state
+# -----------------------------
+if "skills_analyzed" not in st.session_state:
+    st.session_state.skills_analyzed = False
+    st.session_state.show_courses = False
+    st.session_state.missing_skills = []
+    st.session_state.matching_score = 0.0
+    st.session_state.resume_skills = []
+    st.session_state.job_skills = []
+    st.session_state.resume_text = ""
+    st.session_state.job_text = ""
+
+# -----------------------------
+# Helper functions
+# -----------------------------
+def fetch_youtube_courses(skill):
+    try:
+        youtube = googleapiclient.discovery.build(YOUTUBE_API_SERVICE_NAME, YOUTUBE_API_VERSION, developerKey=YOUTUBE_API_KEY)
+        request = youtube.search().list(q=f"{skill} course", part="snippet", maxResults=6, type="video")
+        response = request.execute()
+        return [
+            {
+                "Title": item["snippet"]["title"],
+                "Channel": item["snippet"]["channelTitle"],
+                "Video Link": f'https://www.youtube.com/watch?v={item["id"]["videoId"]}',
+                "Thumbnail": item["snippet"]["thumbnails"].get("medium", {}).get("url", "")
+            }
+            for item in response.get("items", [])
+        ]
+    except:
+        return []
+
+def extract_text(uploaded_file):
+    if uploaded_file:
+        ext = uploaded_file.name.split(".")[-1].lower()
+        if ext == "pdf":
+            with pdfplumber.open(uploaded_file) as pdf:
+                return "\n".join([page.extract_text() for page in pdf.pages if page.extract_text()]) or "No text extracted."
+        elif ext in ["docx", "doc"]:
+            return docx2txt.process(uploaded_file) or "No text extracted."
+        elif ext == "txt":
+            return uploaded_file.read().decode("utf-8") or "No text extracted."
+    return "No text extracted."
+
+def generate_summary(text):
+    sentences = text.split(". ")[:3]
+    return "... ".join(sentences) + "..." if sentences else "No content extracted."
+
+def extract_skills(text):
+    doc = nlp(text)
+    skills = set()
+    for ent in doc.ents:
+        if ent.label_ == "ORG":
+            skills.add(ent.text)
+    return list(skills)
+
+def calculate_matching_score(resume_text, job_text):
+    embeddings = st_model.encode([resume_text, job_text], convert_to_tensor=True)
+    return round(float(util.pytorch_cos_sim(embeddings[0], embeddings[1])[0]), 2) * 100
+
+def plot_skill_distribution_pie(resume_skills, job_skills):
+    resume_labels = list(resume_skills) if resume_skills else ["No Skills Found"]
+    resume_sizes = [1] * len(resume_skills) if resume_skills else [1]
+    job_labels = list(job_skills) if job_skills else ["No Skills Found"]
+    job_sizes = [1] * len(job_skills) if job_skills else [1]
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    axes[0].pie(resume_sizes, labels=resume_labels, autopct='%1.1f%%', startangle=90)
+    axes[0].set_title("Resume Skills")
+    axes[1].pie(job_sizes, labels=job_labels, autopct='%1.1f%%', startangle=90)
+    axes[1].set_title("Job Skills")
+    st.pyplot(fig)
+
+def load_lottie_url(url: str):
     try:
         r = requests.get(url)
         if r.status_code == 200:
@@ -60,170 +128,105 @@ def load_lottie_url(url):
         return None
     return None
 
-LOTTIE_LOGIN = load_lottie_url("https://assets2.lottiefiles.com/packages/lf20_w51pcehl.json")
-LOTTIE_UPLOAD = load_lottie_url("https://assets8.lottiefiles.com/packages/lf20_jcikwtux.json")
-LOTTIE_ANALYZE = load_lottie_url("https://assets6.lottiefiles.com/packages/lf20_g8n0xqbm.json")
+LOTTIE_UPLOAD = load_lottie_url("https://assets2.lottiefiles.com/packages/lf20_w51pcehl.json")
+LOTTIE_ANALYZE = load_lottie_url("https://assets7.lottiefiles.com/private_files/lf30_p9bui5ul.json")
+LOTTIE_SCORE = load_lottie_url("https://assets6.lottiefiles.com/packages/lf20_g8n0xqbm.json")
 
-# ---------------------------
-# 🔹 MODEL FUNCTIONS
-# ---------------------------
+# -----------------------------
+# Navigation
+# -----------------------------
+page = st.sidebar.radio("📂 Navigate", ["📄 Upload Documents", "📝 Summaries", "🧠 Analysis", "📊 Insights & Courses"])
+if st.sidebar.button("Reset All"):
+    for k in list(st.session_state.keys()):
+        del st.session_state[k]
+    st.experimental_rerun()
 
-def extract_text(file):
-    """Extract text from PDF, DOCX, or TXT"""
-    if file.name.endswith('.pdf'):
-        reader = PyPDF2.PdfReader(file)
-        text = ''
-        for page in reader.pages:
-            text += page.extract_text() or ''
-        return text
-    elif file.name.endswith('.docx'):
-        return docx2txt.process(file)
-    elif file.name.endswith('.txt'):
-        return file.read().decode("utf-8")
-    else:
-        return ""
-
-def extract_skills(text):
-    """Extract potential skills from text using keywords"""
-    common_skills = [
-        'python', 'excel', 'sql', 'power bi', 'tableau', 'communication',
-        'leadership', 'analysis', 'machine learning', 'data visualization',
-        'java', 'c++', 'data analytics', 'teamwork', 'critical thinking'
-    ]
-    text = text.lower()
-    found = [skill for skill in common_skills if skill in text]
-    return list(set(found))
-
-def analyze_resume_vs_job(resume_text, job_text):
-    """Compare resume and job text for similarity & skill gap"""
-    vectorizer = CountVectorizer().fit_transform([resume_text, job_text])
-    similarity = cosine_similarity(vectorizer)[0][1]
-    match_score = round(similarity * 100, 2)
-
-    resume_skills = extract_skills(resume_text)
-    job_skills = extract_skills(job_text)
-    missing_skills = [s for s in job_skills if s not in resume_skills]
-
-    return {
-        "match_score": match_score,
-        "resume_skills": resume_skills,
-        "job_skills": job_skills,
-        "missing_skills": missing_skills
-    }
-
-def fetch_youtube_courses(skill):
-    """Fetch top YouTube videos for the given skill"""
-    api_key = "YOUR_YOUTUBE_API_KEY"  # Replace with your key
-    youtube = googleapiclient.discovery.build("youtube", "v3", developerKey=api_key)
-    request = youtube.search().list(part="snippet", maxResults=2, q=f"{skill} tutorial", type="video")
-    response = request.execute()
-
-    videos = []
-    for item in response.get("items", []):
-        videos.append({
-            "Title": item["snippet"]["title"],
-            "Channel": item["snippet"]["channelTitle"],
-            "Thumbnail": item["snippet"]["thumbnails"]["medium"]["url"],
-            "Video Link": f"https://www.youtube.com/watch?v={item['id']['videoId']}"
-        })
-    return videos
-
-# ---------------------------
-# 🔹 LOGIN SYSTEM
-# ---------------------------
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-
-if not st.session_state.logged_in:
-    st.markdown("<h1 class='title'>ProFileMatch</h1>", unsafe_allow_html=True)
-    st_lottie(LOTTIE_LOGIN, height=180)
-
-    with st.form("login_form"):
-        st.subheader("🔐 Login or Create Account")
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        login_button = st.form_submit_button("Login")
-
-        if login_button:
-            if username and password:
-                st.session_state.logged_in = True
-                st.success(f"Welcome, {username}! 🎉")
-                st.experimental_rerun()
-            else:
-                st.error("Please enter both username and password.")
-
-# ---------------------------
-# 🔹 MAIN APP
-# ---------------------------
-else:
-    page = st.sidebar.radio("📂 Navigate", ["📄 Upload Resume", "🧠 Analysis", "📚 Courses"])
-    st.sidebar.markdown("---")
-    if st.sidebar.button("🔒 Logout"):
-        st.session_state.logged_in = False
-        st.experimental_rerun()
-
-    if page == "📄 Upload Resume":
-        st.markdown("<h1 class='title'>📄 Upload Your Documents</h1>", unsafe_allow_html=True)
-        st_lottie(LOTTIE_UPLOAD, height=180)
-        col1, col2 = st.columns(2)
-
-        with col1:
-            resume_file = st.file_uploader("📄 Upload Resume", type=["pdf", "docx", "txt"])
-        with col2:
-            job_file = st.file_uploader("💼 Upload Job Description", type=["pdf", "docx", "txt"])
-
-        if resume_file and job_file:
+# -----------------------------
+# Page 1: Upload Documents
+# -----------------------------
+if page == "📄 Upload Documents":
+    st.markdown("# 📂 Upload Your Documents")
+    col1, col2 = st.columns(2)
+    with col1:
+        resume_file = st.file_uploader("📄 Upload Resume", type=["pdf", "docx", "txt"])
+        if resume_file:
             st.session_state.resume_text = extract_text(resume_file)
+            st.success("Resume Uploaded Successfully!")
+            if LOTTIE_UPLOAD: st_lottie(LOTTIE_UPLOAD, height=180)
+    with col2:
+        job_file = st.file_uploader("💼 Upload Job Description", type=["pdf", "docx", "txt"])
+        if job_file:
             st.session_state.job_text = extract_text(job_file)
-            st.success("✅ Files uploaded successfully!")
+            st.success("Job Description Uploaded Successfully!")
 
-    elif page == "🧠 Analysis":
-        st.markdown("<h1 class='title'>🧠 Resume Analysis Dashboard</h1>", unsafe_allow_html=True)
+# -----------------------------
+# Page 2: Summaries
+# -----------------------------
+elif page == "📝 Summaries":
+    st.header("📝 Resume & Job Description Summaries")
+    if not st.session_state.resume_text or not st.session_state.job_text:
+        st.warning("Please upload both Resume and Job Description first.")
+    else:
+        colA, colB = st.columns(2)
+        with colA: st.subheader("🧾 Resume Summary"); st.info(generate_summary(st.session_state.resume_text))
+        with colB: st.subheader("💼 Job Description Summary"); st.info(generate_summary(st.session_state.job_text))
+        if st.button("Analyze Skills & Matching Score"):
+            resume_skills = extract_skills(st.session_state.resume_text)
+            job_skills = extract_skills(st.session_state.job_text)
+            st.session_state.skills_analyzed = True
+            st.session_state.resume_skills = resume_skills
+            st.session_state.job_skills = job_skills
+            st.session_state.missing_skills = list(set(job_skills)-set(resume_skills))
+            st.session_state.matching_score = calculate_matching_score(st.session_state.resume_text, st.session_state.job_text)
+            st.success("Analysis complete ✅")
 
-        if "resume_text" not in st.session_state or "job_text" not in st.session_state:
-            st.warning("⚠️ Please upload your files first.")
-        else:
-            if st.button("🔍 Analyze Resume"):
-                results = analyze_resume_vs_job(st.session_state.resume_text, st.session_state.job_text)
-                st.session_state.analysis_results = results
-                st.success("✅ Analysis complete!")
+# -----------------------------
+# Page 3: Analysis
+# -----------------------------
+elif page == "🧠 Analysis":
+    st.header("🧠 AI Resume Analysis Dashboard")
+    if not st.session_state.skills_analyzed:
+        st.warning("Run analysis first from the Summaries page.")
+    else:
+        st.subheader("📊 Resume Matching Score")
+        if LOTTIE_SCORE: st_lottie(LOTTIE_SCORE, height=180)
+        st.markdown(f"<div class='metric-box'><h1 style='font-size:60px'>{st.session_state.matching_score:.1f}%</h1><p>Overall Similarity</p></div>", unsafe_allow_html=True)
+        st.subheader("🧾 Extracted Skills")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("### Resume Skills"); st.markdown("<div class='skill-section'>", unsafe_allow_html=True)
+            for s in st.session_state.resume_skills: st.markdown(f"<span class='pill'>{s}</span>", unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+        with col2:
+            st.markdown("### Job Description Skills"); st.markdown("<div class='skill-section'>", unsafe_allow_html=True)
+            for s in st.session_state.job_skills: st.markdown(f"<span class='pill'>{s}</span>", unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+        st.subheader("📈 Visual Skill Comparison")
+        plot_skill_distribution_pie(st.session_state.resume_skills, st.session_state.job_skills)
 
-            if "analysis_results" in st.session_state:
-                results = st.session_state.analysis_results
-                st_lottie(LOTTIE_ANALYZE, height=150)
-                st.markdown(
-                    f"<div class='metric-box'><h1 style='font-size:60px'>{results['match_score']}%</h1><p>Overall Similarity</p></div>",
-                    unsafe_allow_html=True,
-                )
-                st.subheader("🧾 Resume Skills")
-                st.write(", ".join(results["resume_skills"]) or "None found")
-                st.subheader("💼 Job Description Skills")
-                st.write(", ".join(results["job_skills"]) or "None found")
-                st.subheader("⚙️ Missing Skills")
-                if results["missing_skills"]:
-                    st.write(", ".join(results["missing_skills"]))
-                else:
-                    st.success("🎯 Great! No missing skills detected.")
-
-    elif page == "📚 Courses":
-        st.markdown("<h1 class='title'>📚 Recommended YouTube Courses</h1>", unsafe_allow_html=True)
-        if "analysis_results" not in st.session_state:
-            st.warning("Please run the analysis first.")
-        else:
-            missing_skills = st.session_state.analysis_results["missing_skills"]
-            if not missing_skills:
-                st.success("🎉 You're all caught up!")
-            else:
-                for skill in missing_skills:
-                    st.markdown(f"### 🔹 {skill}")
-                    courses = fetch_youtube_courses(skill)
-                    if courses:
-                        for c in courses:
-                            colA, colB = st.columns([1, 4])
-                            with colA:
-                                st.image(c["Thumbnail"], width=160)
-                            with colB:
-                                st.markdown(f"**[{c['Title']}]({c['Video Link']})**")
-                                st.markdown(f"Channel: {c['Channel']}")
-                                vid_id = c["Video Link"].split("v=")[-1]
-                                components.iframe(f"https://www.youtube.com/embed/{vid_id}", height=190)
+# -----------------------------
+# Page 4: Insights & Courses
+# -----------------------------
+elif page == "📊 Insights & Courses":
+    st.header("📚 Personalized Insights & YouTube Recommendations")
+    if not st.session_state.skills_analyzed:
+        st.warning("Please run the analysis first.")
+    else:
+        st.subheader("⚙️ Missing Skills")
+        if st.session_state.missing_skills:
+            st.write(", ".join(st.session_state.missing_skills))
+            if st.button("Show Recommended Courses"):
+                all_courses = []
+                for skill in st.session_state.missing_skills: all_courses.extend(fetch_youtube_courses(skill))
+                if all_courses:
+                    for video in all_courses:
+                        colA, colB = st.columns([1,4])
+                        with colA: 
+                            if video.get('Thumbnail'): st.image(video['Thumbnail'], width=160)
+                        with colB:
+                            st.markdown(f"**[{video['Title']}]({video['Video Link']})**")
+                            st.markdown(f"Channel: {video['Channel']}")
+                            vid_id = video['Video Link'].split('v=')[-1]
+                            components.iframe(f"https://www.youtube.com/embed/{vid_id}", height=190)
+                else: st.warning("No courses found or API quota reached.")
+        else: st.success("Great! No missing skills detected.")
