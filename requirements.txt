@@ -19,6 +19,7 @@ spacy
 # Document parsing
 pdfplumber
 docx2txt
+PyPDF2
 
 # YouTube API
 google-api-python-client
