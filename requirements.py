@@ -1,0 +1,13 @@
+streamlit==1.27.0
+streamlit-lottie==0.0.6
+streamlit-components==0.1.0
+pandas==2.1.0
+numpy==1.25.0
+matplotlib==3.8.1
+sentence-transformers==2.2.2
+torch==2.1.0
+spacy==3.6.1
+pdfplumber==0.9.0
+docx2txt==0.8
+google-api-python-client==2.93.0
+scikit-learn==1.3.1
